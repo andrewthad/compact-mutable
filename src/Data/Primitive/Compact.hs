@@ -26,32 +26,37 @@ newtype CompactMutableArray c s a
   = CompactMutableArray (SmallMutableArray s a)
 newtype CompactValue c a
   = CompactValue a
-newtype Token c
-  = Token (Compact Placeholder)
+data Token c = Token Compact#
 data Placeholder = Placeholder
 
+compactAddGeneral# :: Compact# -> a -> State# s -> (# State# s, a #)
+compactAddGeneral# = unsafeCoerce compactAdd#
+
+compactAddGeneral :: PrimMonad m => Token c -> a -> m a
+compactAddGeneral (Token compact#) a = primitive $ \s ->
+  case compactAddGeneral# compact# a s of { (# s1, pk #) ->
+    (# s1, pk #) }
+
 -- | Create a new mutable array.
-newCompactArray :: (PrimMonad m, m ~ IO)
+newCompactArray :: (PrimMonad m)
   => Token c
   -> Int
   -> m (CompactValue c (CompactMutableArray c (PrimState m) a))
-newCompactArray (Token c) n = do
-  let !defVal = unsafeFromPlaceholder (getCompact c)
+newCompactArray c n = do
+  let !defVal = unsafeFromPlaceholder Placeholder
   marr <- newSmallArray n defVal
   stdHeapArr <- freezeSmallArray marr 0 n
-  cmpt <- compactAdd c stdHeapArr
-  let SmallArray cmptHeapArr = getCompact cmpt
-      !cmptHeapMutArr = unsafeCoerce# cmptHeapArr
+  SmallArray cmptHeapArr <- compactAddGeneral c stdHeapArr
+  let !cmptHeapMutArr = unsafeCoerce# cmptHeapArr
   return (CompactValue (CompactMutableArray (SmallMutableArray cmptHeapMutArr)))
 
-newCompactValue :: (PrimMonad m, m ~ IO)
+newCompactValue :: PrimMonad m
   => Token c
   -> a
   -> m (CompactValue c a)
-newCompactValue (Token c) a = do
-  !cb <- compactAdd c a
-  let !b = getCompact cb
-  return (CompactValue b)
+newCompactValue t a = do
+  !v <- compactAddGeneral t a
+  return (CompactValue v)
 
 writeCompactArray :: (PrimMonad m, m ~ IO)
   => CompactMutableArray c (PrimState m) a 

@@ -11,11 +11,15 @@
 
 module Data.Primitive.Compact
   ( CompactMutableArray
+  , CompactMutablePrimArray(..) -- should not actually export this
   , CompactPrimRef
   , Token
   , withToken
   , newCompactArray
+  , newCompactArrayCopier
   , newCompactPrimRef
+  , newCompactPrimArray
+  , newCompactPrimArrayCopier
   , readCompactArray
   , writeCompactArray
   , copyCompactMutableArray
@@ -47,6 +51,8 @@ newtype CompactMutableArray s (a :: k -> *) (c :: k)
   = CompactMutableArray (MutablePrimArray s Addr) -- (Array (a c))
 newtype CompactPrimRef s a c
   = CompactPrimRef (PrimRef s a)
+newtype CompactMutablePrimArray s a c
+  = CompactMutablePrimArray (MutablePrimArray s a)
 data Token c = Token Compact#
 
 -- withToken :: PrimMonad m => (forall c. Token c -> m x) -> m x
@@ -99,6 +105,25 @@ newCompactPrimRef !c !a = do
   !ref2 <- compactAddGeneral c ref1
   return (CompactPrimRef ref2)
 
+newCompactPrimArray :: (PrimMonad m, Prim a)
+  => Token c
+  -> Int -- ^ Length
+  -> m (CompactMutablePrimArray (PrimState m) a c)
+newCompactPrimArray !c !n = do
+  !ref1 <- newPrimArray n
+  !ref2 <- compactAddGeneral c ref1
+  return (CompactMutablePrimArray ref2)
+
+newCompactPrimArrayCopier :: (PrimMonad m, Prim a)
+  => Token c
+  -> Int -- ^ Length
+  -> m (m (CompactMutablePrimArray (PrimState m) a c))
+newCompactPrimArrayCopier !c !n = do
+  !marr1 <- newPrimArray n
+  return $ do
+    !marr2 <- compactAddGeneral c marr1
+    return (CompactMutablePrimArray marr2)
+
 -- | Create a new mutable array. Notice that we do not need a
 --   default value.
 newCompactArray :: (PrimMonad m)
@@ -111,6 +136,16 @@ newCompactArray !c !n = do
   !marr1 <- newPrimArray n
   !marr2 <- compactAddGeneral c marr1
   return (CompactMutableArray marr2)
+
+newCompactArrayCopier :: PrimMonad m
+  => Token c
+  -> Int
+  -> m (m (CompactMutableArray (PrimState m) a c))
+newCompactArrayCopier !c !n = do
+  !marr1 <- newPrimArray n
+  return $ do
+    !marr2 <- compactAddGeneral c marr1
+    return (CompactMutableArray marr2)
 
 writeCompactArray :: PrimMonad m
   => CompactMutableArray (PrimState m) a c

@@ -1,6 +1,9 @@
+{-# LANGUAGE DataKinds #-}
 {-# LANGUAGE MagicHash #-}
 {-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE TypeFamilies #-}
+
+{-# OPTIONS_GHC -O2 #-}
 
 import Data.Primitive.Compact
 import GHC.Compact
@@ -10,6 +13,7 @@ import Data.Primitive.Array
 import Data.Primitive.PrimArray
 import Data.Primitive.ByteArray
 import Data.Primitive.PrimRef
+import Data.Primitive
 import Data.Functor.Identity
 import Data.Int
 import Control.Monad
@@ -86,12 +90,54 @@ main = do
     Thing n <- readCompactArray a1 0
     when (n /= 74) $ fail "wrong value of n"
     putStrLn "finished aliasing behavior"
+    putStrLn "testing contractible array"
+    k1 <- newContractedArray token 2
+    k5 <- newContractedArray token 3
+    writeContractedArray k1 0 (Foo 55 k1)
+    writeContractedArray k1 1 (Foo 12 k5)
+    writeContractedArray k5 0 (Foo 33 k5)
+    writeContractedArray k5 1 (Foo 42 k1)
+    Foo n k2 <- readContractedArray k1 0
+    Foo m k3 <- readContractedArray k2 0
+    Foo _ k6 <- readContractedArray k5 0
+    Foo _ k7 <- readContractedArray k5 1
+    Foo _ _ <- readContractedArray k6 0
+    Foo _ _ <- readContractedArray k7 1
+    unsafeInsertContractedArray 2 1 (Foo 124 k1) k5
+    Foo _ k8 <- readContractedArray k5 2
+    Foo _ _ <- readContractedArray k8 1
+    Foo _ k9 <- readContractedArray k5 1
+    Foo _ _ <- readContractedArray k9 1
+    if n == 55
+      then return ()
+      else fail "n should be 55"
+    if m == 55
+      then return ()
+      else fail "m should be 55"
+    putStrLn "successful contractible array"
     return ()
 
 -- Note: making types like this to put in a compact array is not
 -- typically safe. Do not do it unless you understand how the compact
 -- heap works.
-data Thing a c = Thing !a
-data MaybeArray c = No | Yes (CompactMutableArray RealWorld MaybeArray c)
-data Ref c = Ref !(PrimRef RealWorld Word16)
+data Thing a (c :: Heap) = Thing !a
+data MaybeArray (c :: Heap) = No | Yes (CompactMutableArray RealWorld MaybeArray c)
+data Ref (c :: Heap) = Ref !(PrimRef RealWorld Word16)
+
+data Foo s c = Foo
+  {-# UNPACK #-} !Int
+  {-# UNPACK #-} !(ContractedMutableArray s (Foo s) c)
+
+instance Contractible (Foo s) where
+  unsafeSizeOfContractedElement _ = sizeOf (undefined :: Int) * 2
+  unsafeWriteContractedArray (ContractedMutableArray marr) ix (Foo n (ContractedMutableArray (MutableByteArray nodes))) = do
+    let machIx = ix * 2
+    writeByteArray marr (machIx + 0) n
+    writeByteArray marr (machIx + 1) (unsafeUnliftedToAddr nodes)
+  unsafeReadContractedArray (ContractedMutableArray marr) ix = do
+    let machIx = ix * 2
+    a <- readByteArray marr (machIx + 0)
+    f <- readByteArray marr (machIx + 1)
+    return (Foo a (ContractedMutableArray (MutableByteArray (unsafeUnliftedFromAddr f))))
+
 

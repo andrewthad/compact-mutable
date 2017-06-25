@@ -1,3 +1,4 @@
+{-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE MagicHash #-}
 {-# LANGUAGE UnboxedTuples #-}
@@ -5,17 +6,23 @@
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE PolyKinds #-}
 {-# LANGUAGE KindSignatures #-}
+{-# LANGUAGE DataKinds #-}
 {-# LANGUAGE Strict #-}
 
 {-# OPTIONS_GHC -O2 #-}
 
 module Data.Primitive.Compact
-  ( CompactMutableArray
+  ( CompactMutableArray(..)
   , CompactMutablePrimArray(..) -- should not actually export this
+  , CompactMutableByteArray(..)
+  , ContractedMutableArray(..)
   , CompactPrimRef
   , Token
+  , Contractible(..)
+  , Heap(..)
   , withToken
   , newCompactArray
+  , newContractedArray
   , newCompactArrayCopier
   , newCompactPrimRef
   , newCompactPrimArray
@@ -23,11 +30,18 @@ module Data.Primitive.Compact
   , readCompactArray
   , writeCompactArray
   , copyCompactMutableArray
+  , copyContractedMutableArray
   , getSizeOfCompact
+  , readContractedArray
+  , writeContractedArray
+  , sizeOfContractedElement
   -- * Unsafe things
   , compactAddGeneral
   , unsafeInsertCompactArray
+  , unsafeInsertContractedArray
   , printCompactArrayAddrs
+  , unsafeUnliftedToAddr
+  , unsafeUnliftedFromAddr
   ) where
 
 import GHC.Int
@@ -35,25 +49,38 @@ import GHC.Prim
 import GHC.Compact
 import Control.Monad
 import Control.Monad.Primitive
+import Data.Primitive
 import Data.Primitive.SmallArray
 import Data.Primitive.Array
 import Data.Primitive.PrimArray
 import Data.Primitive.Types
 import Data.Primitive.PrimRef
+import Data.Primitive.ByteArray
+import Data.Proxy
 import Unsafe.Coerce
 import Debug.Trace
 import GHC.Conc (pseq)
 import GHC.Ptr (Ptr(..))
 import GHC.Word (Word(..))
+import GHC.Types
 
 -- | This represents a mutable array in a compact region.
-newtype CompactMutableArray s (a :: k -> *) (c :: k)
+newtype CompactMutableArray s (a :: Heap -> *) (c :: Heap)
   = CompactMutableArray (MutablePrimArray s Addr) -- (Array (a c))
 newtype CompactPrimRef s a c
   = CompactPrimRef (PrimRef s a)
 newtype CompactMutablePrimArray s a c
   = CompactMutablePrimArray (MutablePrimArray s a)
+newtype CompactMutableByteArray s c
+  = CompactMutableByteArray (MutableByteArray s)
+
+-- | A contracted array is like a prim array, except that
+--   it talks about data structures who have data on a
+--   compact heap.
+newtype ContractedMutableArray s (a :: Heap -> *) (c :: Heap)
+  = ContractedMutableArray (MutableByteArray s)
 data Token c = Token Compact#
+data Heap
 
 -- withToken :: PrimMonad m => (forall c. Token c -> m x) -> m x
 -- withToken f = compactNewGeneral >>= f
@@ -137,6 +164,17 @@ newCompactArray !c !n = do
   !marr2 <- compactAddGeneral c marr1
   return (CompactMutableArray marr2)
 
+newContractedArray :: forall m a c. (PrimMonad m, Contractible a)
+  => Token c
+  -> Int
+  -> m (ContractedMutableArray (PrimState m) a c)
+newContractedArray !c !n = do
+  -- it is unfortunate that we have to do this allocation twice,
+  -- once on the normal heap and once on the compact heap.
+  !marr1 <- newByteArray (n * sizeOfContractedElement (Proxy :: Proxy a))
+  !marr2 <- compactAddGeneral c marr1
+  return (ContractedMutableArray marr2)
+
 newCompactArrayCopier :: PrimMonad m
   => Token c
   -> Int
@@ -182,6 +220,29 @@ unsafeInsertCompactArray !sz !i !x (CompactMutableArray !marr) = do
   writePrimArray marr i (unsafeToAddr x)
 {-# INLINE unsafeInsertCompactArray #-}
 
+unsafeInsertContractedArray :: forall m a c. (PrimMonad m, Contractible a)
+  => Int -- ^ Size of the original array
+  -> Int -- ^ Index
+  -> a c -- ^ Value
+  -> ContractedMutableArray (PrimState m) a c -- ^ Array to modify
+  -> m ()
+unsafeInsertContractedArray !sz !i !x !carr = do
+  copyContractedMutableArray carr (i + 1) carr i (sz - i)
+  writeContractedArray carr i x
+{-# INLINE unsafeInsertContractedArray #-}
+
+copyContractedMutableArray
+  :: forall m a c. (PrimMonad m, Contractible a)
+  => ContractedMutableArray (PrimState m) a c -- ^ destination
+  -> Int -- ^ destination offset
+  -> ContractedMutableArray (PrimState m) a c -- ^ source
+  -> Int -- ^ source offset
+  -> Int -- ^ length
+  -> m ()
+copyContractedMutableArray (ContractedMutableArray !dest) !doff (ContractedMutableArray !src) !soff !len
+  = copyMutableByteArray dest (doff * sizeOfContractedElement (Proxy :: Proxy a)) src (soff * sizeOfContractedElement (Proxy :: Proxy a)) (len * sizeOfContractedElement (Proxy :: Proxy a))
+{-# INLINE copyContractedMutableArray #-}
+
 copyCompactMutableArray
   :: PrimMonad m
   => CompactMutableArray (PrimState m) a c -- ^ destination
@@ -203,6 +264,17 @@ unsafeFromAddr :: Addr -> a
 unsafeFromAddr (Addr x) = unsafeCoerce# x
 {-# INLINE unsafeFromAddr #-}
 
+-- make sure this is actually sound. I'm pretty sure that
+-- unlifted data must already be fully evaluated because of
+-- how its calling convention works.
+unsafeUnliftedToAddr :: forall (a :: TYPE 'UnliftedRep). a -> Addr
+unsafeUnliftedToAddr a = Addr (unsafeCoerce# a :: Addr#)
+{-# INLINE unsafeUnliftedToAddr #-}
+
+unsafeUnliftedFromAddr :: forall (a :: TYPE 'UnliftedRep). Addr -> a
+unsafeUnliftedFromAddr (Addr x) = unsafeCoerce# x
+{-# INLINE unsafeUnliftedFromAddr #-}
+
 showAddr :: Addr -> String
 showAddr (Addr a#) = show (Ptr a#)
 
@@ -212,5 +284,34 @@ printCompactArrayAddrs (CompactMutableArray marr) = do
   forM_ [0..(n - 1)] $ \ix -> do
     addr <- readPrimArray marr ix
     putStrLn (showAddr addr)
+
+sizeOfContractedElement :: Contractible a => Proxy a -> Int
+sizeOfContractedElement = unsafeSizeOfContractedElement
+
+writeContractedArray :: (PrimMonad m, Contractible a) => ContractedMutableArray (PrimState m) a c -> Int -> a c -> m ()
+writeContractedArray = unsafeWriteContractedArray
+
+readContractedArray :: (PrimMonad m, Contractible a) => ContractedMutableArray (PrimState m) a c -> Int -> m (a c)
+readContractedArray = unsafeReadContractedArray
+
+-- | Super dangerous typeclass. Be careful trying to
+--   define instances.
+class Contractible (a :: Heap -> *) where
+  unsafeSizeOfContractedElement :: Proxy a -> Int
+  -- ^ size of serialization, in bytes
+  unsafeWriteContractedArray :: PrimMonad m => ContractedMutableArray (PrimState m) a c -> Int -> a c -> m ()
+  -- ^ remember that the int provided here gives an index in
+  --   elements, not in bytes
+  unsafeReadContractedArray :: PrimMonad m => ContractedMutableArray (PrimState m) a c -> Int -> m (a c)
+  -- ^ index is in elements, not bytes
+
+instance Contractible (CompactMutableArray s a) where
+  unsafeSizeOfContractedElement _ = sizeOf (undefined :: Addr)
+  unsafeWriteContractedArray (ContractedMutableArray marr) ix (CompactMutableArray (MutablePrimArray arr#)) = 
+    writeByteArray marr ix (unsafeUnliftedToAddr arr#)
+  unsafeReadContractedArray (ContractedMutableArray marr) ix = do
+    addr <- readByteArray marr ix
+    return (CompactMutableArray (MutablePrimArray (unsafeUnliftedFromAddr addr)))
   
+
 

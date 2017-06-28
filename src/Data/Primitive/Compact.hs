@@ -39,8 +39,6 @@ module Data.Primitive.Compact
   , unsafeInsertCompactArray
   , unsafeInsertContractedArray
   , printCompactArrayAddrs
-  , unsafeUnliftedToAddr
-  , unsafeUnliftedFromAddr
   ) where
 
 import GHC.Int
@@ -81,7 +79,7 @@ data ContractedMutableArray (a :: * -> Heap -> *) s (c :: Heap)
   = ContractedMutableArray
     (MutableByteArray# s)
     (MutableArrayArray# s)
-data Token c = Token Compact#
+data Token (c :: Heap) = Token Compact#
 data Heap
 
 -- withToken :: PrimMonad m => (forall c. Token c -> m x) -> m x
@@ -267,17 +265,6 @@ unsafeFromAddr :: Addr -> a
 unsafeFromAddr (Addr x) = unsafeCoerce# x
 {-# INLINE unsafeFromAddr #-}
 
--- make sure this is actually sound. I'm pretty sure that
--- unlifted data must already be fully evaluated because of
--- how its calling convention works.
-unsafeUnliftedToAddr :: forall (a :: TYPE 'UnliftedRep). a -> Addr
-unsafeUnliftedToAddr a = Addr (unsafeCoerce# a :: Addr#)
-{-# INLINE unsafeUnliftedToAddr #-}
-
-unsafeUnliftedFromAddr :: forall (a :: TYPE 'UnliftedRep). Addr -> a
-unsafeUnliftedFromAddr (Addr x) = unsafeCoerce# x
-{-# INLINE unsafeUnliftedFromAddr #-}
-
 showAddr :: Addr -> String
 showAddr (Addr a#) = show (Ptr a#)
 
@@ -310,6 +297,15 @@ class Contractible (a :: * -> Heap -> *) where
   --   elements, not in bytes
   readContractedArray# :: MutableByteArray# s -> MutableArrayArray# s -> Int# -> State# s -> (# State# s, a s c #)
   -- ^ index is in elements, not bytes
+
+newtype Heaped a s (c :: Heap) = Heaped a
+
+instance Prim a => Contractible (Heaped a) where
+  unsafeContractedUnliftedPtrCount# _ = 0#
+  unsafeContractedByteCount# _ = sizeOf# (undefined :: a)
+  writeContractedArray# arr _ ix (Heaped a) s = writeByteArray# arr ix a s
+  readContractedArray# arr _ ix s = case readByteArray# arr ix s of
+    (# s', a #) -> (# s', Heaped a #)
 
 -- instance Contractible (CompactMutableArray m a) where
 --   unsafeContractedUnliftedPtrCount _ = 1

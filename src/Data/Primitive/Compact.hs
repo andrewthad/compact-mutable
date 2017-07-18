@@ -34,6 +34,13 @@ module Data.Primitive.Compact
   , getSizeOfCompact
   , readContractedArray
   , writeContractedArray
+  -- * Contracted Forall
+  , ContractibleForall(..)
+  , readContractedForallArray
+  , writeContractedForallArray
+  , newContractedForallArray
+  , unsafeInsertContractedForallArray
+  , copyContractedForallMutableArray
   -- * Unsafe things
   , compactAddGeneral
   , unsafeInsertCompactArray
@@ -175,6 +182,18 @@ newContractedArray !c !n = do
   UnliftedArray aa <- compactAddGeneral c =<< unsafeFreezeUnliftedArray =<< newUnliftedArray (n * I# (unsafeContractedUnliftedPtrCount# (proxy# :: Proxy# a))) (MutableByteArray ba)
   return (ContractedMutableArray ba (unsafeCoerce# aa))
 
+newContractedForallArray :: forall m a c. (PrimMonad m, ContractibleForall a)
+  => Token c
+  -> Int
+  -> ContractibleForallWitness a
+  -> m (ContractedMutableArray a (PrimState m) c)
+newContractedForallArray !c !n !w = do
+  let szBytes = unsafeContractedForallByteCount# w
+      szPtrs = unsafeContractedForallUnliftedPtrCount# w
+  MutableByteArray ba <- compactAddGeneral c =<< newByteArray (n * I# szBytes)
+  UnliftedArray aa <- compactAddGeneral c =<< unsafeFreezeUnliftedArray =<< newUnliftedArray (n * I# szPtrs) (MutableByteArray ba)
+  return (ContractedMutableArray ba (unsafeCoerce# aa))
+
 newCompactArrayCopier :: PrimMonad m
   => Token c
   -> Int
@@ -231,6 +250,18 @@ unsafeInsertContractedArray !sz !i !x !carr = do
   writeContractedArray carr i x
 {-# INLINE unsafeInsertContractedArray #-}
 
+unsafeInsertContractedForallArray :: forall m a c. (PrimMonad m, ContractibleForall a)
+  => Int -- ^ Size of the original array
+  -> Int -- ^ Index
+  -> a (PrimState m) c -- ^ Value
+  -> ContractedMutableArray a (PrimState m) c -- ^ Array to modify
+  -> ContractibleForallWitness a
+  -> m ()
+unsafeInsertContractedForallArray !sz !i !x !carr !w = do
+  copyContractedForallMutableArray carr (i + 1) carr i (sz - i) w
+  writeContractedForallArray carr i x
+{-# INLINE unsafeInsertContractedForallArray #-}
+
 copyContractedMutableArray
   :: forall m a c. (PrimMonad m, Contractible a)
   => ContractedMutableArray a (PrimState m) c -- ^ destination
@@ -243,6 +274,22 @@ copyContractedMutableArray (ContractedMutableArray destB destA) (I# destOff) (Co
   = primitive_ $ \s1 -> case copyMutableByteArray# srcB (srcOff *# (unsafeContractedByteCount# (proxy# :: Proxy# a))) destB (destOff *# (unsafeContractedByteCount# (proxy# :: Proxy# a))) (len *# (unsafeContractedByteCount# (proxy# :: Proxy# a))) s1 of
       s2 -> copyMutableArrayArray# srcA (srcOff *# (unsafeContractedUnliftedPtrCount# (proxy# :: Proxy# a))) destA (destOff *# (unsafeContractedUnliftedPtrCount# (proxy# :: Proxy# a))) (len *# (unsafeContractedUnliftedPtrCount# (proxy# :: Proxy# a))) s2
 {-# INLINE copyContractedMutableArray #-}
+
+copyContractedForallMutableArray
+  :: forall m a c. (PrimMonad m, ContractibleForall a)
+  => ContractedMutableArray a (PrimState m) c -- ^ destination
+  -> Int -- ^ destination offset
+  -> ContractedMutableArray a (PrimState m) c -- ^ source
+  -> Int -- ^ source offset
+  -> Int -- ^ length
+  -> ContractibleForallWitness a
+  -> m ()
+copyContractedForallMutableArray (ContractedMutableArray destB destA) (I# destOff) (ContractedMutableArray srcB srcA) (I# srcOff) (I# len) w
+  = let szBytes = unsafeContractedForallByteCount# w
+        szPtrs = unsafeContractedForallUnliftedPtrCount# w
+     in primitive_ $ \s1 -> case copyMutableByteArray# srcB (srcOff *# szBytes) destB (destOff *# szBytes) (len *# szBytes) s1 of
+          s2 -> copyMutableArrayArray# srcA (srcOff *# szPtrs) destA (destOff *# szPtrs) (len *# szPtrs) s2
+{-# INLINE copyContractedForallMutableArray #-}
 
 copyCompactMutableArray
   :: PrimMonad m
@@ -280,10 +327,21 @@ writeContractedArray :: (PrimMonad m, Contractible a)
 writeContractedArray (ContractedMutableArray ba aa) (I# ix) r =
   primitive_ $ \s -> writeContractedArray# ba aa ix r s
 
+writeContractedForallArray :: (PrimMonad m, ContractibleForall a)
+  => ContractedMutableArray a (PrimState m) c -> Int -> a (PrimState m) c -> m ()
+writeContractedForallArray (ContractedMutableArray ba aa) (I# ix) r =
+  primitive_ $ \s -> writeContractedForallArray# ba aa ix r s
+
 readContractedArray :: (PrimMonad m, Contractible a)
   => ContractedMutableArray a (PrimState m) c -> Int -> m (a (PrimState m) c)
 readContractedArray (ContractedMutableArray ba aa) (I# ix) =
   primitive $ \s -> readContractedArray# ba aa ix s
+
+readContractedForallArray :: (PrimMonad m, ContractibleForall a)
+  => ContractedMutableArray a (PrimState m) c -> Int -> ContractibleForallWitness a -> m (a (PrimState m) c)
+readContractedForallArray (ContractedMutableArray ba aa) (I# ix) w =
+  primitive $ \s -> readContractedForallArray# ba aa ix w s
+
 
 -- | Super dangerous typeclass. Be careful trying to
 --   define instances.
@@ -296,6 +354,18 @@ class Contractible (a :: * -> Heap -> *) where
   -- ^ remember that the int provided here gives an index in
   --   elements, not in bytes
   readContractedArray# :: MutableByteArray# s -> MutableArrayArray# s -> Int# -> State# s -> (# State# s, a s c #)
+  -- ^ index is in elements, not bytes
+  --
+class ContractibleForall (a :: * -> Heap -> *) where
+  data ContractibleForallWitness a
+  unsafeContractedForallUnliftedPtrCount# :: ContractibleForallWitness a -> Int#
+  -- ^ Number of unlifted pointers
+  unsafeContractedForallByteCount# :: ContractibleForallWitness a -> Int#
+  -- ^ size of serialization, in bytes
+  writeContractedForallArray# :: MutableByteArray# s -> MutableArrayArray# s -> Int# -> a s c -> State# s -> State# s
+  -- ^ remember that the int provided here gives an index in
+  --   elements, not in bytes
+  readContractedForallArray# :: MutableByteArray# s -> MutableArrayArray# s -> Int# -> ContractibleForallWitness a -> State# s -> (# State# s, a s c #)
   -- ^ index is in elements, not bytes
 
 newtype Heaped a s (c :: Heap) = Heaped a
